@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Smart Pool Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="libs/feather.min.js"></script>
+  <link rel="stylesheet" href="style.css">
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+</head>
+<body>
+
+<!-- Landing Page -->
+<div id="landingPage">
+  <h1>Welcome to Smart Pool</h1>
+  <button onclick="enterDashboard()">Enter Dashboard</button>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboardPage" style="display:none;">
+  <header>Smart Pool Chlorine Dashboard</header>
+  <main>
+    <!-- Dashboard Grid -->
+    <div class="dashboard-grid">
+      <div class="card">
+        <h2><i data-feather="clock"></i> Real-Time Clock</h2>
+        <div class="value" id="realTimeClock">--:--:--</div>
+      </div>
+      <div class="card">
+        <h2><i data-feather="thermometer"></i> Water Temperature</h2>
+        <div class="value" id="temperatureValue">-- °C</div>
+      </div>
+      <div class="card">
+        <h2><i data-feather="user"></i> Pool Type</h2>
+        <div class="value" id="poolTypeValue">--</div>
+      </div>
+      <div class="card">
+        <h2><i data-feather="cloud"></i> Turbidity Level</h2>
+        <div class="value" id="turbidityValue">-- NTU</div>
+      </div>
+      <div class="card">
+        <h2><i data-feather="box"></i> Dispensed Amount</h2>
+        <div class="value" id="dispensedValue">-- ml</div>
+      </div>
+    </div>
+
+    <!-- Prediction Mode Toggle Button (now at top right, replaces Simulated Data button) -->
+    <div class="mode-toggle">
+      <button class="toggle-prediction-btn" id="togglePredictionBtn">
+        Show: Single Prediction
+      </button>
+    </div>
+
+    <!-- Centered Box with Prediction Sections -->
+    <div class="center-box-wrapper">
+      <div class="center-box">
+        <!-- Single Prediction Section -->
+        <div id="singlePrediction" class="mode-section">
+          <form id="singleForm">
+            <label for="poolType">Type of Pool:</label>
+            <select id="poolType" required>
+              <option value="concrete">Concrete</option>
+              <option value="fiberglass">Fiberglass</option>
+            </select>
+            <label for="tdsValue">TDS Value (ppm):</label>
+            <input type="number" id="tdsValue" min="0" required>
+            <label for="waterTemp">Water Temperature (°C):</label>
+            <input type="number" id="waterTemp" min="0" max="50" required>
+            <button type="submit">Predict</button>
+          </form>
+          <div id="singleResult" class="result"></div>
+        </div>
+        <!-- Dataset Prediction Section -->
+        <div id="datasetPrediction" class="mode-section" style="display:none;">
+          <form id="datasetForm">
+            <label for="csvFile">Import CSV Dataset:</label>
+            <input type="file" id="csvFile" accept=".csv" required>
+            <button type="submit">Predict Dataset</button>
+          </form>
+          <div id="datasetResult" class="result"></div>
+        </div>
+        <!-- ESP32 Prediction Section -->
+        <div id="esp32Prediction" class="mode-section" style="display:none;">
+  <div class="esp32-switch-row">
+    <label class="switch">
+      <input type="checkbox" id="esp32Switch">
+      <span class="slider"></span>
+    </label>
+    <span style="margin-left:8px;">Enable ESP32 Prediction</span>
+  </div>
+  <div class="esp32-pooltype-row">
+    <label>Pool Type:</label>
+    <button type="button" id="esp32TypeBtn" class="pooltype-btn">None</button>
+  </div>
+  <div id="esp32LiveInputs" style="margin-top:1em; display:none;">
+    <div><strong>Live ESP32 Data:</strong></div>
+    <div>TDS Value (ppm): <span id="esp32LiveTDS">--</span></div>
+    <div>Water Temp (°C): <span id="esp32LiveTemp">--</span></div>
+    <div>Turbidity (NTU): <span id="esp32LiveTurbidity">--</span></div>
+  </div>
+  <div id="esp32Result" class="result"></div>
+</div>
+        <!-- Legend -->
+        <div class="legend">
+          <div><span class="indicator green"></span> Ideal</div>
+          <div><span class="indicator yellow"></span> Chlorine Needed</div>
+          <div><span class="indicator red"></span> Draining System On</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Chart -->
+    <div class="chart-container">
+      <h2><i data-feather="bar-chart-2"></i> Turbidity Level Over Time</h2>
+      <canvas id="chlorineChart"></canvas>
+      <button class="download-btn" onclick="downloadCSV()"><i data-feather="download"></i> Download CSV</button>
+    </div>
+  </main>
+</div>
+
+<script>
+/** ========== Helper & Utility ========== */
+function getTimeString() {
+  const now = new Date();
+  return now.toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'});
+}
+
+function updateClock() {
+  document.getElementById('realTimeClock').textContent = getTimeString();
+}
+
+function setDashboardValues({turbidity, temperature, dispensed, poolType}) {
+  document.getElementById('turbidityValue').textContent = (turbidity !== undefined) ? turbidity + ' NTU' : '-- NTU';
+  document.getElementById('temperatureValue').textContent = (temperature !== undefined) ? temperature.toFixed(1) + ' °C' : '-- °C';
+  document.getElementById('dispensedValue').textContent = (dispensed !== undefined) ? dispensed + ' ml' : '-- ml';
+  document.getElementById('poolTypeValue').textContent = (poolType !== undefined) ? poolType.charAt(0).toUpperCase() + poolType.slice(1) : '--';
+}
+
+/** ========== Firebase & Prediction Logic ========== */
+const firebaseConfig = {
+  apiKey: "AIzaSyCh9hlSxQEBqSW9mCU9kdS7citKyndpj-o",
+  authDomain: "pool-ml.firebaseapp.com",
+  databaseURL: "https://pool-ml-default-rtdb.firebaseio.com",
+  projectId: "pool-ml",
+  storageBucket: "pool-ml.firebasestorage.app",
+  messagingSenderId: "1010065172945",
+  appId: "1:1010065172945:web:d81bce2c79065d39d2d8f0",
+  measurementId: "G-X72D2617BS"
+};
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+function getPoolTDSRange(poolType) {
+  if (poolType === "concrete") return {min: 200, max: 400};
+  if (poolType === "fiberglass") return {min: 100, max: 250};
+  return {min: 0, max: 0};
+}
+function getTDSStatus(poolType, tds) {
+  const {min, max} = getPoolTDSRange(poolType);
+  if (tds < min) return {status: "Chlorine Needed", color: "yellow"};
+  else if (tds > max) return {status: "Draining System On", color: "red"};
+  else return {status: "Ideal", color: "green"};
+}
+function getChlorineDose(poolType, tds) {
+  const {min} = getPoolTDSRange(poolType);
+  if (tds < min) return Math.round(1 + 2 * Math.random());
+  else return 0;
+}
+
+/** ========== Dashboard/Simulation Chart ========== */
+let simulatedMode = true;
+let simulationInterval;
+let chlorineTimestamps = Array(24).fill("--:--");
+const ctx = document.getElementById('chlorineChart').getContext('2d');
+const chlorineChart = new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: chlorineTimestamps,
+    datasets: [{
+      label: 'Turbidity Level (NTU)',
+      data: Array(24).fill(2.0),
+      borderColor: '#0077b6',
+      backgroundColor: 'rgba(0, 119, 182, 0.1)',
+      fill: true,
+      tension: 0.4
+    }]
+  },
+  options: {
+    scales: {
+      y: { min: 0, max: 10 }
+    }
+  }
+});
+function startSimulation() {
+  simulationInterval = setInterval(() => {
+    if (!simulatedMode || currentModeIdx === 2) return;
+    const turbidity = (Math.random() * 4 + 2).toFixed(2);
+    const temperature = 28.0;
+    const timeNow = getTimeString();
+    chlorineChart.data.labels.shift();
+    chlorineChart.data.labels.push(timeNow);
+    chlorineChart.data.datasets[0].data.shift();
+    chlorineChart.data.datasets[0].data.push(Number(turbidity));
+    chlorineChart.update();
+    setDashboardValues({turbidity, temperature});
+  }, 5000);
+}
+function downloadCSV() {
+  let csv = "data:text/csv;charset=utf-8,Time,Turbidity Level (NTU)\n";
+  chlorineChart.data.labels.forEach((label, i) => {
+    csv += `${label},${chlorineChart.data.datasets[0].data[i]}\n`;
+  });
+  const link = document.createElement("a");
+  link.setAttribute("href", encodeURI(csv));
+  link.setAttribute("download", "turbidity_data.csv");
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+/** ========== Prediction Mode Toggle ========== */
+const modes = [
+  {id: 'singlePrediction',  label: 'Single Prediction'},
+  {id: 'datasetPrediction', label: 'Dataset Prediction'},
+  {id: 'esp32Prediction',   label: 'ESP32 Prediction'}
+];
+let currentModeIdx = 0;
+const toggleBtn = document.getElementById('togglePredictionBtn');
+function showPredictionMode(idx) {
+  modes.forEach((mode, i) => {
+    document.getElementById(mode.id).style.display = (i === idx) ? '' : 'none';
+  });
+  toggleBtn.textContent = "Show: " + modes[idx].label;
+  updateDashboardGridForMode();
+}
+toggleBtn.onclick = function() {
+  currentModeIdx = (currentModeIdx + 1) % modes.length;
+  showPredictionMode(currentModeIdx);
+};
+showPredictionMode(currentModeIdx);
+
+/** ========== Dashboard Grid Value Logic ========== */
+function updateDashboardGridForMode() {
+  // Only on ESP32 prediction mode, show actual values, else --
+  if (currentModeIdx === 2 && window.lastEsp32Data) {
+    setDashboardValues({
+      turbidity: window.lastEsp32Data.turbidity,
+      temperature: window.lastEsp32Data.temp,
+      dispensed: window.lastEsp32Data.chlorine,
+      poolType: window.lastEsp32Data.poolType
+    });
+  } else {
+    setDashboardValues({}); // set all to --
+  }
+}
+
+/** ========== Event Handlers ========== */
+function enterDashboard() {
+  document.getElementById('landingPage').classList.add('hide');
+  setTimeout(() => {
+    document.getElementById('landingPage').style.display = 'none';
+    document.getElementById('dashboardPage').style.display = 'block';
+    startSimulation();
+    setInterval(updateClock, 1000);
+    setDashboardValues({});
+  }, 1000);
+}
+
+/* --- Single Prediction Form --- */
+document.getElementById('singleForm').onsubmit = async function(e) {
+  e.preventDefault();
+  const poolType = document.getElementById('poolType').value;
+  const tdsValue = parseFloat(document.getElementById('tdsValue').value);
+  const waterTemp = parseFloat(document.getElementById('waterTemp').value);
+
+  const tdsStatus = getTDSStatus(poolType, tdsValue);
+  const chlorineDose = getChlorineDose(poolType, tdsValue);
+
+  db.ref('pool_data').push({
+    poolType, tdsValue, waterTemp,
+    tdsStatus: tdsStatus.status,
+    chlorineDose: chlorineDose,
+    timestamp: Date.now()
+  });
+
+  document.getElementById('singleResult').innerHTML = `
+    <div>
+      <strong>Status:</strong> ${tdsStatus.status}
+      <span class="indicator ${tdsStatus.color}"></span>
+    </div>
+    <div>
+      ${tdsStatus.status === "Chlorine Needed" ? `<strong>Chlorine Dose:</strong> ${chlorineDose} ppm` : ""}
+    </div>
+  `;
+};
+
+/* --- Dataset Prediction Form --- */
+document.getElementById('datasetForm').onsubmit = async function(e) {
+  e.preventDefault();
+  const fileInput = document.getElementById('csvFile');
+  if (!fileInput.files.length) return;
+  const file = fileInput.files[0];
+  const reader = new FileReader();
+  reader.onload = async function(evt) {
+    const csv = evt.target.result;
+    const rows = csv.split('\n').map(row => row.split(','));
+    // Assume header: poolType,tdsValue,waterTemp
+    const header = rows[0].map(h => h.trim());
+    const dataRows = rows.slice(1).filter(r => r.length > 2 && r.some(v => v.trim()));
+    let html = '<table><tr><th>Pool Type</th><th>TDS</th><th>Temp</th><th>Status</th><th>Chlorine Dose</th></tr>';
+    for (const row of dataRows) {
+      const obj = {};
+      row.forEach((v,i) => obj[header[i]] = v.trim());
+      const tdsStatus = getTDSStatus(obj.poolType, obj.tdsValue);
+      const chlorineDose = getChlorineDose(obj.poolType, obj.tdsValue);
+      html += `<tr>
+        <td>${obj.poolType}</td>
+        <td>${obj.tdsValue}</td>
+        <td>${obj.waterTemp}</td>
+        <td><span class="indicator ${tdsStatus.color}"></span> ${tdsStatus.status}</td>
+        <td>${tdsStatus.status === "Chlorine Needed" ? chlorineDose : ""}</td>
+      </tr>`;
+    }
+    html += '</table>';
+    document.getElementById('datasetResult').innerHTML = html;
+  };
+  reader.readAsText(file);
+};
+
+/** ========== ESP32 Prediction (Firebase-driven) ========== */
+const esp32FirebaseConfig = {
+  apiKey: "AIzaSyDUMMYKEY-REPLACE_THIS",
+  authDomain: "esp32-pool-ml.firebaseapp.com",
+  databaseURL: "https://esp32-pool-ml-default-rtdb.firebaseio.com",
+  projectId: "esp32-pool-ml",
+  storageBucket: "esp32-pool-ml.appspot.com",
+  messagingSenderId: "1020065172945",
+  appId: "1:1020065172945:web:dummyce2c79065d39d2d8f0",
+  measurementId: "G-YOURDUMMYID"
+};
+const esp32App = firebase.initializeApp(esp32FirebaseConfig, "esp32App");
+const esp32Db = esp32App.database();
+
+let esp32PredictionEnabled = false;
+let esp32PoolType = "none";
+let esp32LiveData = { tds: null, temp: null, turbidity: null };
+
+const esp32Switch = document.getElementById("esp32Switch");
+const esp32TypeBtn = document.getElementById("esp32TypeBtn");
+
+// Pool type toggle logic (cycle through all types)
+const poolTypeOrder = ["none", "concrete", "fiberglass"];
+esp32TypeBtn.onclick = function() {
+  let idx = poolTypeOrder.indexOf(esp32PoolType);
+  esp32PoolType = poolTypeOrder[(idx + 1) % poolTypeOrder.length];
+  esp32TypeBtn.textContent =
+    esp32PoolType === "none"
+      ? "None"
+      : esp32PoolType.charAt(0).toUpperCase() + esp32PoolType.slice(1);
+
+  // Style update
+  esp32TypeBtn.classList.remove("pooltype-concrete", "pooltype-fiberglass", "pooltype-none");
+  esp32TypeBtn.classList.add("pooltype-" + esp32PoolType);
+
+  // Update dashboard grid immediately on pool type toggle
+  if (esp32PredictionEnabled && currentModeIdx === 2) updateDashboardGridForMode();
+};
+esp32TypeBtn.classList.add("pooltype-none");
+
+esp32Switch.onchange = function() {
+  esp32PredictionEnabled = esp32Switch.checked;
+  if (esp32PredictionEnabled) {
+    subscribeToESP32Live();
+    updateDashboardGridForMode();
+  } else {
+    document.getElementById("esp32Result").innerHTML = "";
+    if (currentModeIdx === 2) setDashboardValues({});
+  }
+};
+
+let esp32Listener = null;
+function subscribeToESP32Live() {
+  if (esp32Listener) esp32Db.ref('esp32_live').off('value', esp32Listener);
+  esp32Listener = esp32Db.ref('esp32_live').on('value', (snap) => {
+    const data = snap.val() || {};
+    esp32LiveData = {
+      tds: data.tds !== undefined && data.tds !== null ? parseFloat(data.tds) : null,
+      temp: data.temp !== undefined && data.temp !== null ? parseFloat(data.temp) : null,
+      turbidity: data.turbidity !== undefined && data.turbidity !== null ? parseFloat(data.turbidity) : null
+    };
+    updateESP32Prediction();
+  });
+}
+
+// ML prediction and dashboard update for ESP32 mode
+function updateESP32Prediction() {
+  // Always update dashboard grid in ESP32 mode, even if data is missing!
+  if (esp32PredictionEnabled && currentModeIdx === 2) updateDashboardGridForMode();
+
+  // Only show a result if we have TDS and pool type is not "none"
+  if (!esp32PredictionEnabled || esp32PoolType === "none" || esp32LiveData.tds === null) {
+    document.getElementById("esp32Result").innerHTML = "";
+    return;
+  }
+  const tdsStatus = getTDSStatus(esp32PoolType, esp32LiveData.tds);
+  const chlorineDose = getChlorineDose(esp32PoolType, esp32LiveData.tds);
+  const dispensed = tdsStatus.status === "Chlorine Needed" ? chlorineDose : 0;
+
+  // Store last values for dashboard display
+  window.lastEsp32Data = {
+    tds: esp32LiveData.tds,
+    temp: esp32LiveData.temp,
+    turbidity: esp32LiveData.turbidity,
+    chlorine: dispensed,
+    poolType: esp32PoolType
+  };
+
+  document.getElementById('esp32Result').innerHTML = `
+    <div>
+      <strong>Status:</strong> ${tdsStatus.status}
+      <span class="indicator ${tdsStatus.color}"></span>
+    </div>
+    <div>
+      ${tdsStatus.status === "Chlorine Needed" ? `<strong>Chlorine Dose:</strong> ${chlorineDose} ppm` : ""}
+    </div>
+  `;
+
+  // Update chart
+  const timeNow = getTimeString();
+  chlorineChart.data.labels.shift();
+  chlorineChart.data.labels.push(timeNow);
+  chlorineChart.data.datasets[0].data.shift();
+  chlorineChart.data.datasets[0].data.push(esp32LiveData.turbidity || 0);
+  chlorineChart.update();
+}
+
+// Always show selected pool type (and live values if present) in dashboard grid
+function updateDashboardGridForMode() {
+  if (currentModeIdx === 2 && esp32PredictionEnabled && esp32PoolType !== "none") {
+    setDashboardValues({
+      turbidity: esp32LiveData.turbidity !== null ? esp32LiveData.turbidity : undefined,
+      temperature: esp32LiveData.temp !== null ? esp32LiveData.temp : undefined,
+      dispensed: (esp32LiveData.tds !== null && esp32PoolType !== "none")
+        ? getChlorineDose(esp32PoolType, esp32LiveData.tds)
+        : undefined,
+      poolType: esp32PoolType // always use the toggle value!
+    });
+  } else {
+    setDashboardValues({});
+  }
+}
+
+/** ========== Feather Icons Init ========== */
+document.addEventListener('DOMContentLoaded', () => { feather.replace(); });
+window.onload = function() { feather.replace(); };
+  
+</script>
+</body>
+</html>
